@@ -245,22 +245,22 @@ public class Main {
               System.out.println("Client " + clientAddr + ": Received GET " + key + ", sent " + value);
             }
           } else if ("RPUSH".equalsIgnoreCase(command)) {
-            if (numElements != 3) {
+            if (numElements < 3) {
               outputStream.write("-ERR wrong number of arguments for RPUSH\r\n".getBytes());
               outputStream.flush();
               System.out.println("Client " + clientAddr + ": Wrong number of arguments for RPUSH: " + numElements);
               continue;
             }
             String key = elements[1];
-            String value = elements[2];
+            List<String> values = Arrays.asList(elements).subList(2, elements.length);
             // Atomically update the list
             store.compute(key, (k, existingEntry) -> {
               List<String> list;
               if (existingEntry == null || existingEntry.isExpired()) {
-                list = new ArrayList<>(Arrays.asList(value));
+                list = new ArrayList<>(values);
               } else if (existingEntry.isList()) {
                 list = new ArrayList<>(existingEntry.getListValue());
-                list.add(value);
+                list.addAll(values);
               } else {
                 return existingEntry; // Will trigger error below
               }
@@ -277,7 +277,7 @@ public class Main {
             String response = ":" + length + "\r\n";
             outputStream.write(response.getBytes());
             outputStream.flush();
-            System.out.println("Client " + clientAddr + ": Received RPUSH " + key + " " + value + ", sent " + length);
+            System.out.println("Client " + clientAddr + ": Received RPUSH " + key + " with " + values.size() + " elements, sent " + length);
           } else {
             outputStream.write("-ERR unknown command\r\n".getBytes());
             outputStream.flush();
@@ -293,7 +293,6 @@ public class Main {
             reader.close();
           }
           if (outputStream != null) {
-            outputStream.flush();
             outputStream.close();
           }
           if (clientSocket != null) {
