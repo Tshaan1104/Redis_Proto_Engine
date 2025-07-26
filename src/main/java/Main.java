@@ -382,32 +382,66 @@ public class Main {
             outputStream.flush();
             System.out.println(clientAddr + ": LLEN " + key + " -> " + length);
           } else if ("LPOP".equalsIgnoreCase(command)) {
-            if (numElements != 2) {
+            if (numElements != 2 && numElements != 3) {
               outputStream.write("-ERR wrong number of arguments for LPOP\r\n".getBytes());
               outputStream.flush();
               System.out.println(clientAddr + ": Wrong LPOP args: " + numElements);
               continue;
             }
             String key = elements[1];
-            String[] poppedValue = new String[1]; // Array to capture popped value
+            final int finalCount;
+            if (numElements == 3) {
+              try {
+                finalCount = Integer.parseInt(elements[2]);
+                if (finalCount < 0) {
+                  outputStream.write("-ERR count must be non-negative\r\n".getBytes());
+                  outputStream.flush();
+                  System.out.println(clientAddr + ": LPOP " + key + " failed: negative count " + elements[2]);
+                  continue;
+                }
+              } catch (NumberFormatException e) {
+                outputStream.write("-ERR invalid count\r\n".getBytes());
+                outputStream.flush();
+                System.out.println(clientAddr + ": LPOP " + key + " failed: invalid count " + elements[2]);
+                continue;
+              }
+            } else {
+              finalCount = 1; // Default count for LPOP without count argument
+            }
+            List<String> poppedValues = new ArrayList<>(); // To capture popped values
             store.compute(key, (k, existing) -> {
               if (existing == null || existing.isExpired() || !existing.isList() || existing.getListValue().isEmpty()) {
-                poppedValue[0] = null;
                 return existing;
               }
               List<String> list = new ArrayList<>(existing.getListValue());
-              poppedValue[0] = list.remove(0);
-              return new ValueEntry(list, existing.getListValue().isEmpty() ? existing.expiryTime : 0);
+              int elementsToRemove = Math.min(finalCount, list.size());
+              for (int i = 0; i < elementsToRemove; i++) {
+                poppedValues.add(list.remove(0));
+              }
+              return new ValueEntry(list, list.isEmpty() ? existing.expiryTime : 0);
             });
-            if (poppedValue[0] == null) {
-              outputStream.write("$-1\r\n".getBytes());
-              outputStream.flush();
-              System.out.println(clientAddr + ": LPOP " + key + " -> null");
+            if (numElements == 2) {
+              // Single-element LPOP returns a bulk string
+              if (poppedValues.isEmpty()) {
+                outputStream.write("$-1\r\n".getBytes());
+                outputStream.flush();
+                System.out.println(clientAddr + ": LPOP " + key + " -> null");
+              } else {
+                String value = poppedValues.get(0);
+                String response = "$" + value.length() + "\r\n" + value + "\r\n";
+                outputStream.write(response.getBytes());
+                outputStream.flush();
+                System.out.println(clientAddr + ": LPOP " + key + " -> " + value);
+              }
             } else {
-              String response = "$" + poppedValue[0].length() + "\r\n" + poppedValue[0] + "\r\n";
-              outputStream.write(response.getBytes());
+              // Multi-element LPOP returns an array
+              StringBuilder response = new StringBuilder("*" + poppedValues.size() + "\r\n");
+              for (String value : poppedValues) {
+                response.append("$").append(value.length()).append("\r\n").append(value).append("\r\n");
+              }
+              outputStream.write(response.toString().getBytes());
               outputStream.flush();
-              System.out.println(clientAddr + ": LPOP " + key + " -> " + poppedValue[0]);
+              System.out.println(clientAddr + ": LPOP " + key + " " + finalCount + " -> " + poppedValues.size() + " elements");
             }
           } else {
             String ll="-ERR unknown command: " + command + "\r\n";
@@ -418,7 +452,8 @@ public class Main {
         }
         System.out.println(clientAddr + ": Disconnected");
       } catch (IOException e) {
-         String clientAddr = clientSocket.getInetAddress().getHostAddress();
+          String clientAddr = clientSocket.getInetAddress().getHostAddress();
+
         System.out.println(clientAddr + ": IOException: " + e.getMessage());
       } finally {
         try {
@@ -426,7 +461,8 @@ public class Main {
           if (outputStream != null) outputStream.close();
           if (clientSocket != null) clientSocket.close();
         } catch (IOException e) {
-           String clientAddr = clientSocket.getInetAddress().getHostAddress();
+          String clientAddr = clientSocket.getInetAddress().getHostAddress();
+
           System.out.println(clientAddr + ": IOException closing: " + e.getMessage());
         }
       }
