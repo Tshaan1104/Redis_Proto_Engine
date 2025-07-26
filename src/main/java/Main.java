@@ -36,7 +36,7 @@ public class Main {
       }
     } catch (IOException e) {
       e.printStackTrace(System.err);
-System.out.println("IOException: " + e.getMessage());
+      System.out.println("IOException: " + e.getMessage());
     } finally {
       try {
         if (serverSocket != null) {
@@ -381,6 +381,34 @@ System.out.println("IOException: " + e.getMessage());
             outputStream.write(response.getBytes());
             outputStream.flush();
             System.out.println(clientAddr + ": LLEN " + key + " -> " + length);
+          } else if ("LPOP".equalsIgnoreCase(command)) {
+            if (numElements != 2) {
+              outputStream.write("-ERR wrong number of arguments for LPOP\r\n".getBytes());
+              outputStream.flush();
+              System.out.println(clientAddr + ": Wrong LPOP args: " + numElements);
+              continue;
+            }
+            String key = elements[1];
+            String[] poppedValue = new String[1]; // Array to capture popped value
+            store.compute(key, (k, existing) -> {
+              if (existing == null || existing.isExpired() || !existing.isList() || existing.getListValue().isEmpty()) {
+                poppedValue[0] = null;
+                return existing;
+              }
+              List<String> list = new ArrayList<>(existing.getListValue());
+              poppedValue[0] = list.remove(0);
+              return new ValueEntry(list, existing.getListValue().isEmpty() ? existing.expiryTime : 0);
+            });
+            if (poppedValue[0] == null) {
+              outputStream.write("$-1\r\n".getBytes());
+              outputStream.flush();
+              System.out.println(clientAddr + ": LPOP " + key + " -> null");
+            } else {
+              String response = "$" + poppedValue[0].length() + "\r\n" + poppedValue[0] + "\r\n";
+              outputStream.write(response.getBytes());
+              outputStream.flush();
+              System.out.println(clientAddr + ": LPOP " + key + " -> " + poppedValue[0]);
+            }
           } else {
             String ll="-ERR unknown command: " + command + "\r\n";
             outputStream.write(ll.getBytes());
@@ -390,8 +418,7 @@ System.out.println("IOException: " + e.getMessage());
         }
         System.out.println(clientAddr + ": Disconnected");
       } catch (IOException e) {
-                  String clientAddr = clientSocket.getInetAddress().getHostAddress();
-
+         String clientAddr = clientSocket.getInetAddress().getHostAddress();
         System.out.println(clientAddr + ": IOException: " + e.getMessage());
       } finally {
         try {
@@ -399,8 +426,7 @@ System.out.println("IOException: " + e.getMessage());
           if (outputStream != null) outputStream.close();
           if (clientSocket != null) clientSocket.close();
         } catch (IOException e) {
-                    String clientAddr = clientSocket.getInetAddress().getHostAddress();
-
+           String clientAddr = clientSocket.getInetAddress().getHostAddress();
           System.out.println(clientAddr + ": IOException closing: " + e.getMessage());
         }
       }
