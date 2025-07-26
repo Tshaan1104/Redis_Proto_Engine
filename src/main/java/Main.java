@@ -278,6 +278,53 @@ public class Main {
             outputStream.write(response.getBytes());
             outputStream.flush();
             System.out.println("Client " + clientAddr + ": Received RPUSH " + key + " with " + values.size() + " elements, sent " + length);
+          } else if ("LRANGE".equalsIgnoreCase(command)) {
+            if (numElements != 4) {
+              outputStream.write("-ERR wrong number of arguments for LRANGE\r\n".getBytes());
+              outputStream.flush();
+              System.out.println("Client " + clientAddr + ": Wrong number of arguments for LRANGE: " + numElements);
+              continue;
+            }
+            String key = elements[1];
+            long start, end;
+            try {
+              start = Long.parseLong(elements[2]);
+              end = Long.parseLong(elements[3]);
+              if (start < 0 || end < 0) {
+                outputStream.write("-ERR index out of range\r\n".getBytes());
+                outputStream.flush();
+                System.out.println("Client " + clientAddr + ": Received LRANGE " + key + " " + elements[2] + " " + elements[3] + ", failed: negative index");
+                continue;
+              }
+            } catch (NumberFormatException e) {
+              outputStream.write("-ERR invalid index\r\n".getBytes());
+              outputStream.flush();
+              System.out.println("Client " + clientAddr + ": Received LRANGE " + key + " " + elements[2] + " " + elements[3] + ", failed: invalid index");
+              continue;
+            }
+            ValueEntry entry = store.get(key);
+            if (entry == null || entry.isExpired() || !entry.isList()) {
+              outputStream.write("*0\r\n".getBytes());
+              outputStream.flush();
+              System.out.println("Client " + clientAddr + ": Received LRANGE " + key + " " + start + " " + end + ", sent empty array (missing, expired, or not a list)");
+              continue;
+            }
+            List<String> list = entry.getListValue();
+            if (start > end || start >= list.size()) {
+              outputStream.write("*0\r\n".getBytes());
+              outputStream.flush();
+              System.out.println("Client " + clientAddr + ": Received LRANGE " + key + " " + start + " " + end + ", sent empty array (invalid range)");
+              continue;
+            }
+            int adjustedEnd = (int) Math.min(end, list.size() - 1);
+            List<String> range = list.subList((int) start, adjustedEnd + 1);
+            StringBuilder response = new StringBuilder("*" + range.size() + "\r\n");
+            for (String value : range) {
+              response.append("$").append(value.length()).append("\r\n").append(value).append("\r\n");
+            }
+            outputStream.write(response.toString().getBytes());
+            outputStream.flush();
+            System.out.println("Client " + clientAddr + ": Received LRANGE " + key + " " + start + " " + end + ", sent " + range.size() + " elements");
           } else {
             outputStream.write("-ERR unknown command\r\n".getBytes());
             outputStream.flush();
