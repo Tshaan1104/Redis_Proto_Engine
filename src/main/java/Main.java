@@ -6,6 +6,7 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -27,13 +28,14 @@ public class Main {
       // Continuously accept new client connections
       while (true) {
         Socket clientSocket = serverSocket.accept();
-        System.out.println("New client connected: " + clientSocket.getRemoteSocketAddress());
+        System.out.println("Client connected: " + clientSocket.getRemoteSocketAddress());
         
         // Start a new thread to handle the client
-        ClientHandler clientHandler = new ClientHandler(clientSocket);
-        new Thread(clientHandler).start();
+        ClientHandler clientSocketHandler = new ClientHandler(clientSocket);
+        new Thread(clientSocketHandler).start();
       }
     } catch (IOException e) {
+      e.printStackTrace(System.err);
       System.out.println("IOException: " + e.getMessage());
     } finally {
       try {
@@ -41,10 +43,11 @@ public class Main {
           serverSocket.close();
         }
       } catch (IOException e) {
-        System.out.println("IOException when closing server: " + e.getMessage());
+        e.printStackTrace(System.err);
+        System.out.println("IOException closing server: " + e.getMessage());
       }
     }
-  }
+}
 
   // Class to store either a string value or a list with expiry time
   static class ValueEntry {
@@ -61,7 +64,7 @@ public class Main {
       this.isList = false;
     }
 
-    // Constructor for list value (RPUSH)
+    // Constructor for list value (RPUSH/LPUSH)
     public ValueEntry(List<String> listValue, long expiryTime) {
       this.stringValue = null;
       this.listValue = listValue;
@@ -82,7 +85,7 @@ public class Main {
     }
 
     public boolean isExpired() {
-      return expiryTime > 0 && System.currentTimeMillis() > expiryTime;
+      return expiryTime > 0 && System.currentTimeMillis() >= expiryTime;
     }
   }
 
@@ -103,36 +106,37 @@ public class Main {
         outputStream = clientSocket.getOutputStream();
         String clientAddr = clientSocket.getRemoteSocketAddress().toString();
 
-        // Read RESP commands in a loop
+        // Read RESP commands
         String line;
         while ((line = reader.readLine()) != null) {
           // Expect RESP array starting with '*'
           if (!line.startsWith("*")) {
             outputStream.write("-ERR invalid RESP array\r\n".getBytes());
             outputStream.flush();
-            System.out.println("Client " + clientAddr + ": Invalid RESP array: " + line);
+            System.out.println(clientAddr + ": Invalid array: " + line);
             continue;
           }
 
-          // Parse number of elements in the array
+          // Parse number of elements
           int numElements;
           try {
             numElements = Integer.parseInt(line.substring(1));
           } catch (NumberFormatException e) {
-            outputStream.write("-ERR invalid array length\r\n".getBytes());
+            String ll="-ERR invalid array length: " + line + "\r\n";
+            outputStream.write(ll.getBytes());
             outputStream.flush();
-            System.out.println("Client " + clientAddr + ": Invalid array length: " + line);
+            System.out.println(clientAddr + ": Invalid array length: " + e.getMessage());
             continue;
           }
 
-          // Read command and arguments
+          // Read command elements
           String[] elements = new String[numElements];
           for (int i = 0; i < numElements; i++) {
             String bulkStringHeader = reader.readLine();
             if (bulkStringHeader == null || !bulkStringHeader.startsWith("$")) {
               outputStream.write("-ERR invalid bulk string header\r\n".getBytes());
               outputStream.flush();
-              System.out.println("Client " + clientAddr + ": Invalid bulk string header: " + bulkStringHeader);
+              System.out.println(clientAddr + ": Invalid bulk header: " + bulkStringHeader);
               continue;
             }
 
@@ -140,9 +144,10 @@ public class Main {
             try {
               bulkStringLength = Integer.parseInt(bulkStringHeader.substring(1));
             } catch (NumberFormatException e) {
-              outputStream.write("-ERR invalid bulk string length\r\n".getBytes());
+              String ll="-ERR invalid bulk string length: " + bulkStringHeader + "\r\n";
+              outputStream.write(ll.getBytes());
               outputStream.flush();
-              System.out.println("Client " + clientAddr + ": Invalid bulk string length: " + bulkStringHeader);
+              System.out.println(clientAddr + ": Invalid bulk length: " + e.getMessage());
               continue;
             }
 
@@ -150,18 +155,18 @@ public class Main {
             if (value == null || value.length() != bulkStringLength) {
               outputStream.write("-ERR invalid bulk string value\r\n".getBytes());
               outputStream.flush();
-              System.out.println("Client " + clientAddr + ": Invalid bulk string value: " + value);
+              System.out.println(clientAddr + ": Invalid bulk value: " + value);
               continue;
             }
 
             elements[i] = value;
           }
 
-          // Process the command
+          // Process command
           if (elements.length == 0) {
             outputStream.write("-ERR no command provided\r\n".getBytes());
             outputStream.flush();
-            System.out.println("Client " + clientAddr + ": No command provided");
+            System.out.println(clientAddr + ": No command provided");
             continue;
           }
 
@@ -170,28 +175,28 @@ public class Main {
             if (numElements != 1) {
               outputStream.write("-ERR wrong number of arguments for PING\r\n".getBytes());
               outputStream.flush();
-              System.out.println("Client " + clientAddr + ": Wrong number of arguments for PING: " + numElements);
+              System.out.println(clientAddr + ": Wrong PING args: " + numElements);
               continue;
             }
             outputStream.write("+PONG\r\n".getBytes());
             outputStream.flush();
-            System.out.println("Client " + clientAddr + ": Received PING, sent PONG");
+            System.out.println(clientAddr + ": PING -> PONG");
           } else if ("ECHO".equalsIgnoreCase(command)) {
             if (numElements != 2) {
               outputStream.write("-ERR wrong number of arguments for ECHO\r\n".getBytes());
               outputStream.flush();
-              System.out.println("Client " + clientAddr + ": Wrong number of arguments for ECHO: " + numElements);
+              System.out.println(clientAddr + ": Wrong ECHO args: " + numElements);
               continue;
             }
             String response = "$" + elements[1].length() + "\r\n" + elements[1] + "\r\n";
             outputStream.write(response.getBytes());
             outputStream.flush();
-            System.out.println("Client " + clientAddr + ": Received ECHO " + elements[1] + ", sent " + elements[1]);
+            System.out.println(clientAddr + ": ECHO " + elements[1]);
           } else if ("SET".equalsIgnoreCase(command)) {
             if (numElements != 3 && numElements != 5) {
               outputStream.write("-ERR wrong number of arguments for SET\r\n".getBytes());
               outputStream.flush();
-              System.out.println("Client " + clientAddr + ": Wrong number of arguments for SET: " + numElements);
+              System.out.println(clientAddr + ": Wrong SET args: " + numElements);
               continue;
             }
             String key = elements[1];
@@ -201,7 +206,7 @@ public class Main {
               if (!"PX".equalsIgnoreCase(elements[3])) {
                 outputStream.write("-ERR invalid argument for SET\r\n".getBytes());
                 outputStream.flush();
-                System.out.println("Client " + clientAddr + ": Invalid argument for SET: " + elements[3]);
+                System.out.println(clientAddr + ": Invalid SET arg: " + elements[3]);
                 continue;
               }
               try {
@@ -209,26 +214,26 @@ public class Main {
                 if (expiryMs <= 0) {
                   outputStream.write("-ERR invalid expiry time\r\n".getBytes());
                   outputStream.flush();
-                  System.out.println("Client " + clientAddr + ": Invalid expiry time: " + elements[4]);
+                  System.out.println(clientAddr + ": Invalid expiry: " + elements[4]);
                   continue;
                 }
                 expiryTime = System.currentTimeMillis() + expiryMs;
-              } catch(NumberFormatException e) {
+              } catch (NumberFormatException e) {
                 outputStream.write("-ERR invalid expiry time\r\n".getBytes());
                 outputStream.flush();
-                System.out.println("Client " + clientAddr + ": Invalid expiry time: " + elements[4]);
+                System.out.println(clientAddr + ": Invalid expiry: " + elements[4]);
                 continue;
               }
             }
             store.put(key, new ValueEntry(value, expiryTime));
             outputStream.write("+OK\r\n".getBytes());
             outputStream.flush();
-            System.out.println("Client " + clientAddr + ": Received SET " + key + " " + value + (expiryTime > 0 ? " with PX " + elements[4] : ""));
+            System.out.println(clientAddr + ": SET " + key + " " + value + (expiryTime > 0 ? " PX " + elements[4] : ""));
           } else if ("GET".equalsIgnoreCase(command)) {
             if (numElements != 2) {
               outputStream.write("-ERR wrong number of arguments for GET\r\n".getBytes());
               outputStream.flush();
-              System.out.println("Client " + clientAddr + ": Wrong number of arguments for GET: " + numElements);
+              System.out.println(clientAddr + ": Wrong GET args: " + numElements);
               continue;
             }
             String key = elements[1];
@@ -236,24 +241,23 @@ public class Main {
             if (entry == null || entry.isExpired() || entry.isList()) {
               outputStream.write("$-1\r\n".getBytes());
               outputStream.flush();
-              System.out.println("Client " + clientAddr + ": Received GET " + key + ", sent null (missing, expired, or not a string)");
+              System.out.println(clientAddr + ": GET " + key + " -> null");
             } else {
               String value = entry.getStringValue();
               String response = "$" + value.length() + "\r\n" + value + "\r\n";
               outputStream.write(response.getBytes());
               outputStream.flush();
-              System.out.println("Client " + clientAddr + ": Received GET " + key + ", sent " + value);
+              System.out.println(clientAddr + ": GET " + key + " -> " + value);
             }
           } else if ("RPUSH".equalsIgnoreCase(command)) {
             if (numElements < 3) {
               outputStream.write("-ERR wrong number of arguments for RPUSH\r\n".getBytes());
               outputStream.flush();
-              System.out.println("Client " + clientAddr + ": Wrong number of arguments for RPUSH: " + numElements);
+              System.out.println(clientAddr + ": Wrong RPUSH args: " + numElements);
               continue;
             }
             String key = elements[1];
             List<String> values = Arrays.asList(elements).subList(2, elements.length);
-            // Atomically update the list
             store.compute(key, (k, existingEntry) -> {
               List<String> list;
               if (existingEntry == null || existingEntry.isExpired()) {
@@ -262,27 +266,61 @@ public class Main {
                 list = new ArrayList<>(existingEntry.getListValue());
                 list.addAll(values);
               } else {
-                return existingEntry; // Will trigger error below
+                return existingEntry;
               }
-              return new ValueEntry(list, 0); // No expiry for lists
+              return new ValueEntry(list, 0);
             });
             ValueEntry entry = store.get(key);
             if (!entry.isList()) {
               outputStream.write("-ERR key exists and is not a list\r\n".getBytes());
               outputStream.flush();
-              System.out.println("Client " + clientAddr + ": Received RPUSH " + key + ", failed: key exists and is not a list");
+              System.out.println(clientAddr + ": RPUSH " + key + " failed: not a list");
               continue;
             }
             int length = entry.getListValue().size();
             String response = ":" + length + "\r\n";
             outputStream.write(response.getBytes());
             outputStream.flush();
-            System.out.println("Client " + clientAddr + ": Received RPUSH " + key + " with " + values.size() + " elements, sent " + length);
+            System.out.println(clientAddr + ": RPUSH " + key + " " + values.size() + " elements -> " + length);
+          } else if ("LPUSH".equalsIgnoreCase(command)) {
+            if (numElements < 3) {
+              outputStream.write("-ERR wrong number of arguments for LPUSH\r\n".getBytes());
+              outputStream.flush();
+              System.out.println(clientAddr + ": Wrong LPUSH args: " + numElements);
+              continue;
+            }
+            String key = elements[1];
+            List<String> values = new ArrayList<>(Arrays.asList(elements).subList(2, elements.length));
+            Collections.reverse(values); // Reverse to match tester's expected order
+            store.compute(key, (k, existing) -> {
+              List<String> list;
+              if (existing == null || existing.isExpired()) {
+                list = new ArrayList<>(values);
+              } else if (existing.isList()) {
+                list = new ArrayList<>(existing.getListValue());
+                list.addAll(0, values);
+              } else {
+                return existing;
+              }
+              return new ValueEntry(list, 0);
+            });
+            ValueEntry entry = store.get(key);
+            if (!entry.isList()) {
+              outputStream.write("-ERR key exists and is not a list\r\n".getBytes());
+              outputStream.flush();
+              System.out.println(clientAddr + ": LPUSH " + key + " failed: not a list");
+              continue;
+            }
+            int length = entry.getListValue().size();
+            String response = ":" + length + "\r\n";
+            outputStream.write(response.getBytes());
+            outputStream.flush();
+            System.out.println(clientAddr + ": LPUSH " + key + " " + values.size() + " elements (reversed) -> " + length);
           } else if ("LRANGE".equalsIgnoreCase(command)) {
             if (numElements != 4) {
               outputStream.write("-ERR wrong number of arguments for LRANGE\r\n".getBytes());
               outputStream.flush();
-              System.out.println("Client " + clientAddr + ": Wrong number of arguments for LRANGE: " + numElements);
+              System.out.println(clientAddr + ": Wrong LRANGE args: " + numElements);
               continue;
             }
             String key = elements[1];
@@ -293,18 +331,17 @@ public class Main {
             } catch (NumberFormatException e) {
               outputStream.write("-ERR invalid index\r\n".getBytes());
               outputStream.flush();
-              System.out.println("Client " + clientAddr + ": Received LRANGE " + key + " " + elements[2] + " " + elements[3] + ", failed: invalid index");
+              System.out.println(clientAddr + ": LRANGE " + key + " " + elements[2] + " " + elements[3] + " failed: invalid index");
               continue;
             }
             ValueEntry entry = store.get(key);
             if (entry == null || entry.isExpired() || !entry.isList()) {
               outputStream.write("*0\r\n".getBytes());
               outputStream.flush();
-              System.out.println("Client " + clientAddr + ": Received LRANGE " + key + " " + start + " " + end + ", sent empty array (missing, expired, or not a list)");
+              System.out.println(clientAddr + ": LRANGE " + key + " " + start + " " + end + " -> empty (missing/expired/not list)");
               continue;
             }
             List<String> list = entry.getListValue();
-            // Convert negative indices to positive
             int listSize = list.size();
             if (start < 0) {
               start = Math.max(0, listSize + start);
@@ -315,7 +352,7 @@ public class Main {
             if (start > end || start >= listSize) {
               outputStream.write("*0\r\n".getBytes());
               outputStream.flush();
-              System.out.println("Client " + clientAddr + ": Received LRANGE " + key + " " + start + " " + end + ", sent empty array (invalid range)");
+              System.out.println(clientAddr + ": LRANGE " + key + " " + start + " " + end + " -> empty (invalid range)");
               continue;
             }
             int adjustedEnd = (int) Math.min(end, listSize - 1);
@@ -326,29 +363,28 @@ public class Main {
             }
             outputStream.write(response.toString().getBytes());
             outputStream.flush();
-            System.out.println("Client " + clientAddr + ": Received LRANGE " + key + " " + start + " " + end + ", sent " + range.size() + " elements");
+            System.out.println(clientAddr + ": LRANGE " + key + " " + start + " " + end + " -> " + range.size() + " elements");
           } else {
-            outputStream.write("-ERR unknown command\r\n".getBytes());
+            String ll="-ERR unknown command: " + command + "\r\n";
+            outputStream.write(ll.getBytes());
             outputStream.flush();
-            System.out.println("Client " + clientAddr + ": Received unknown command: " + command);
+            System.out.println(clientAddr + ": Unknown command: " + command);
           }
         }
-        System.out.println("Client " + clientAddr + " disconnected");
+        System.out.println(clientAddr + ": Disconnected");
       } catch (IOException e) {
-        System.out.println("IOException for client " + clientSocket.getRemoteSocketAddress() + ": " + e.getMessage());
+        String clientAddr = clientSocket.getInetAddress().getHostAddress();
+
+        System.out.println(clientAddr + ": IOException: " + e.getMessage());
       } finally {
         try {
-          if (reader != null) {
-            reader.close();
-          }
-          if (outputStream != null) {
-            outputStream.close();
-          }
-          if (clientSocket != null) {
-            clientSocket.close();
-          }
+          if (reader != null) reader.close();
+          if (outputStream != null) outputStream.close();
+          if (clientSocket != null) clientSocket.close();
         } catch (IOException e) {
-          System.out.println("IOException when closing client " + clientSocket.getRemoteSocketAddress() + ": " + e.getMessage());
+          String clientAddr = clientSocket.getInetAddress().getHostAddress();
+
+          System.out.println(clientAddr + ": IOException closing: " + e.getMessage());
         }
       }
     }
