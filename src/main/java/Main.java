@@ -36,7 +36,7 @@ public class Main {
       }
     } catch (IOException e) {
       e.printStackTrace(System.err);
-      System.out.println("IOException: " + e.getMessage());
+System.out.println("IOException: " + e.getMessage());
     } finally {
       try {
         if (serverSocket != null) {
@@ -47,7 +47,7 @@ public class Main {
         System.out.println("IOException closing server: " + e.getMessage());
       }
     }
-}
+  }
 
   // Class to store either a string value or a list with expiry time
   static class ValueEntry {
@@ -364,6 +364,23 @@ public class Main {
             outputStream.write(response.toString().getBytes());
             outputStream.flush();
             System.out.println(clientAddr + ": LRANGE " + key + " " + start + " " + end + " -> " + range.size() + " elements");
+          } else if ("LLEN".equalsIgnoreCase(command)) {
+            if (numElements != 2) {
+              outputStream.write("-ERR wrong number of arguments for LLEN\r\n".getBytes());
+              outputStream.flush();
+              System.out.println(clientAddr + ": Wrong LLEN args: " + numElements);
+              continue;
+            }
+            String key = elements[1];
+            ValueEntry entry = store.get(key);
+            int length = 0;
+            if (entry != null && !entry.isExpired() && entry.isList()) {
+              length = entry.getListValue().size();
+            }
+            String response = ":" + length + "\r\n";
+            outputStream.write(response.getBytes());
+            outputStream.flush();
+            System.out.println(clientAddr + ": LLEN " + key + " -> " + length);
           } else {
             String ll="-ERR unknown command: " + command + "\r\n";
             outputStream.write(ll.getBytes());
@@ -373,7 +390,7 @@ public class Main {
         }
         System.out.println(clientAddr + ": Disconnected");
       } catch (IOException e) {
-        String clientAddr = clientSocket.getInetAddress().getHostAddress();
+                  String clientAddr = clientSocket.getInetAddress().getHostAddress();
 
         System.out.println(clientAddr + ": IOException: " + e.getMessage());
       } finally {
@@ -382,7 +399,7 @@ public class Main {
           if (outputStream != null) outputStream.close();
           if (clientSocket != null) clientSocket.close();
         } catch (IOException e) {
-          String clientAddr = clientSocket.getInetAddress().getHostAddress();
+                    String clientAddr = clientSocket.getInetAddress().getHostAddress();
 
           System.out.println(clientAddr + ": IOException closing: " + e.getMessage());
         }
