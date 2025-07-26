@@ -253,19 +253,27 @@ public class Main {
             }
             String key = elements[1];
             String value = elements[2];
+            // Atomically update the list
+            store.compute(key, (k, existingEntry) -> {
+              List<String> list;
+              if (existingEntry == null || existingEntry.isExpired()) {
+                list = new ArrayList<>(Arrays.asList(value));
+              } else if (existingEntry.isList()) {
+                list = new ArrayList<>(existingEntry.getListValue());
+                list.add(value);
+              } else {
+                return existingEntry; // Will trigger error below
+              }
+              return new ValueEntry(list, 0); // No expiry for lists
+            });
             ValueEntry entry = store.get(key);
-            List<String> list;
-            int length;
-            if (entry == null || entry.isExpired()) {
-              list = new ArrayList<>(Arrays.asList(value));
-              length = 1;
-              store.put(key, new ValueEntry(list, 0)); // No expiry for lists in this stage
-            } else {
+            if (!entry.isList()) {
               outputStream.write("-ERR key exists and is not a list\r\n".getBytes());
               outputStream.flush();
               System.out.println("Client " + clientAddr + ": Received RPUSH " + key + ", failed: key exists and is not a list");
               continue;
             }
+            int length = entry.getListValue().size();
             String response = ":" + length + "\r\n";
             outputStream.write(response.getBytes());
             outputStream.flush();
@@ -285,6 +293,7 @@ public class Main {
             reader.close();
           }
           if (outputStream != null) {
+            outputStream.flush();
             outputStream.close();
           }
           if (clientSocket != null) {
