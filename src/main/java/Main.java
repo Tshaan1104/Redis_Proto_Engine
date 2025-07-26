@@ -213,7 +213,7 @@ public class Main {
                   continue;
                 }
                 expiryTime = System.currentTimeMillis() + expiryMs;
-              } catch (NumberFormatException e) {
+              } catch(NumberFormatException e) {
                 outputStream.write("-ERR invalid expiry time\r\n".getBytes());
                 outputStream.flush();
                 System.out.println("Client " + clientAddr + ": Invalid expiry time: " + elements[4]);
@@ -290,12 +290,6 @@ public class Main {
             try {
               start = Long.parseLong(elements[2]);
               end = Long.parseLong(elements[3]);
-              if (start < 0 || end < 0) {
-                outputStream.write("-ERR index out of range\r\n".getBytes());
-                outputStream.flush();
-                System.out.println("Client " + clientAddr + ": Received LRANGE " + key + " " + elements[2] + " " + elements[3] + ", failed: negative index");
-                continue;
-              }
             } catch (NumberFormatException e) {
               outputStream.write("-ERR invalid index\r\n".getBytes());
               outputStream.flush();
@@ -310,13 +304,21 @@ public class Main {
               continue;
             }
             List<String> list = entry.getListValue();
-            if (start > end || start >= list.size()) {
+            // Convert negative indices to positive
+            int listSize = list.size();
+            if (start < 0) {
+              start = Math.max(0, listSize + start);
+            }
+            if (end < 0) {
+              end = Math.max(0, listSize + end);
+            }
+            if (start > end || start >= listSize) {
               outputStream.write("*0\r\n".getBytes());
               outputStream.flush();
               System.out.println("Client " + clientAddr + ": Received LRANGE " + key + " " + start + " " + end + ", sent empty array (invalid range)");
               continue;
             }
-            int adjustedEnd = (int) Math.min(end, list.size() - 1);
+            int adjustedEnd = (int) Math.min(end, listSize - 1);
             List<String> range = list.subList((int) start, adjustedEnd + 1);
             StringBuilder response = new StringBuilder("*" + range.size() + "\r\n");
             for (String value : range) {
