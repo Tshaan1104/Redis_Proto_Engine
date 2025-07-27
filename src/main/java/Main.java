@@ -4,12 +4,13 @@ import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.List;
+import java.util.ArrayList;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 
 public class Main {
   // Thread-safe key-value store with expiry
@@ -105,7 +106,9 @@ public class Main {
     // Method to notify this client with a popped key and value
     public void notifyClient(String key, String value) {
       try {
+        System.out.println(clientSocket.getRemoteSocketAddress() + ": Attempting to notify with key " + key + ", value " + value);
         notificationQueue.put(new String[]{key, value});
+        System.out.println(clientSocket.getRemoteSocketAddress() + ": Notified with key " + key + ", value " + value);
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
         System.out.println(clientSocket.getRemoteSocketAddress() + ": Interrupted while notifying: " + e.getMessage());
@@ -145,8 +148,7 @@ public class Main {
           try {
             numElements = Integer.parseInt(line.substring(1));
           } catch (NumberFormatException e) {
-            String ll="-ERR invalid array length: " + line + "\r\n";
-            outputStream.write(ll.getBytes());
+            outputStream.write(("-ERR invalid array length: " + line + "\r\n").getBytes());
             outputStream.flush();
             System.out.println(clientAddr + ": Invalid array length: " + e.getMessage());
             continue;
@@ -170,8 +172,7 @@ public class Main {
             try {
               bulkStringLength = Integer.parseInt(bulkStringHeader.substring(1));
             } catch (NumberFormatException e) {
-              String ll="-ERR invalid bulk string length: " + bulkStringHeader + "\r\n";
-              outputStream.write(ll.getBytes());
+              outputStream.write(("-ERR invalid bulk string length: " + bulkStringHeader + "\r\n").getBytes());
               outputStream.flush();
               System.out.println(clientAddr + ": Invalid bulk length: " + e.getMessage());
               continue;
@@ -485,10 +486,19 @@ public class Main {
             }
             String key = elements[1];
             String timeoutStr = elements[2];
-            if (!"0".equals(timeoutStr)) {
-              outputStream.write("-ERR timeout must be 0\r\n".getBytes());
+            float timeout;
+            try {
+              timeout = Float.parseFloat(timeoutStr);
+              if (timeout < 0) {
+                outputStream.write("-ERR timeout must be non-negative\r\n".getBytes());
+                outputStream.flush();
+                System.out.println(clientAddr + ": Wrong BLPOP timeout: " + timeoutStr);
+                continue;
+              }
+            } catch (NumberFormatException e) {
+              outputStream.write("-ERR invalid timeout\r\n".getBytes());
               outputStream.flush();
-              System.out.println(clientAddr + ": BLPOP " + key + " failed: invalid timeout " + timeoutStr);
+              System.out.println(clientAddr + ": Invalid BLPOP timeout: " + timeoutStr);
               continue;
             }
             // Check if list has elements immediately
@@ -510,18 +520,54 @@ public class Main {
               System.out.println(clientAddr + ": BLPOP " + key + " -> [" + key + ", " + value + "]");
               continue;
             }
-            // Block until an element is available
+            // Block until an element is available or timeout expires
             LinkedBlockingQueue<ClientHandler> queue = blockedClients.computeIfAbsent(key, k -> new LinkedBlockingQueue<>());
             try {
               queue.put(this); // Add client to blocking queue
-              System.out.println(clientAddr + ": BLPOP " + key + " blocking");
-              String[] result = notificationQueue.take(); // Block until notified
+              System.out.println(clientAddr + ": BLPOP " + key + " blocking for " + timeout + " seconds, queue size: " + queue.size());
+              long timeoutMs = (long) (timeout * 1000);
+              // Use minimal timeout for 0.0 to allow notifications
+              String[] result = timeout == 0 ? notificationQueue.take() : notificationQueue.poll(timeoutMs > 0 ? timeoutMs : 1, TimeUnit.MILLISECONDS);
+              System.out.println(clientAddr + ": BLPOP " + key + " poll result: " + (result == null ? "null" : Arrays.toString(result)));
+              // Re-check list if poll returns null for timeout == 0.0
+              if (result == null && timeout == 0) {
+                entry = store.get(key);
+                if (entry != null && !entry.isExpired() && entry.isList() && !entry.getListValue().isEmpty()) {
+                  List<String> poppedValues = new ArrayList<>();
+                  store.compute(key, (k, existing) -> {
+                    if (existing == null || existing.isExpired() || !existing.isList() || existing.getListValue().isEmpty()) {
+                      return existing;
+                    }
+                    List<String> list = new ArrayList<>(existing.getListValue());
+                    poppedValues.add(list.remove(0));
+                    return new ValueEntry(list, list.isEmpty() ? existing.expiryTime : 0);
+                  });
+                  queue.remove(this);
+                  if (!poppedValues.isEmpty()) {
+                    String value = poppedValues.get(0);
+                    String response = "*2\r\n$" + key.length() + "\r\n" + key + "\r\n$" + value.length() + "\r\n" + value + "\r\n";
+                    outputStream.write(response.getBytes());
+                    outputStream.flush();
+                    System.out.println(clientAddr + ": BLPOP " + key + " re-checked -> [" + key + ", " + value + "]");
+                    continue;
+                  }
+                }
+              }
+              // Remove client from queue only if it was not served
+              if (result == null) {
+                queue.remove(this);
+                outputStream.write("$-1\r\n".getBytes());
+                outputStream.flush();
+                System.out.println(clientAddr + ": BLPOP " + key + " timed out after " + timeout + " seconds, queue size: " + queue.size());
+                continue;
+              }
+              queue.remove(this); // Remove client after successful notification
               String poppedKey = result[0];
               String value = result[1];
               String response = "*2\r\n$" + poppedKey.length() + "\r\n" + poppedKey + "\r\n$" + value.length() + "\r\n" + value + "\r\n";
               outputStream.write(response.getBytes());
               outputStream.flush();
-              System.out.println(clientAddr + ": BLPOP " + key + " unblocked -> [" + poppedKey + ", " + value + "]");
+              System.out.println(clientAddr + ": BLPOP " + key + " unblocked -> [" + poppedKey + ", " + value + "], queue size: " + queue.size());
             } catch (InterruptedException e) {
               Thread.currentThread().interrupt();
               queue.remove(this);
@@ -532,8 +578,7 @@ public class Main {
               break;
             }
           } else {
-            String ll="-ERR unknown command: " + command + "\r\n";
-            outputStream.write(ll.getBytes());
+            outputStream.write(("-ERR unknown command: " + command + "\r\n").getBytes());
             outputStream.flush();
             System.out.println(clientAddr + ": Unknown command: " + command);
           }
@@ -549,12 +594,10 @@ public class Main {
           if (outputStream != null) outputStream.close();
           if (clientSocket != null && !clientSocket.isClosed()) clientSocket.close();
         } catch (IOException e) {
-                    String clientAddr = clientSocket.getInetAddress().getHostAddress();
-
+          String clientAddr = clientSocket.getInetAddress().getHostAddress();
           System.out.println(clientAddr + ": IOException closing: " + e.getMessage());
         }
-                  String clientAddr = clientSocket.getInetAddress().getHostAddress();
-
+        String clientAddr = clientSocket.getInetAddress().getHostAddress();
         System.out.println(clientAddr + ": Disconnected");
       }
     }
@@ -563,17 +606,21 @@ public class Main {
     private void notifyBlockedClients(String key) {
       LinkedBlockingQueue<ClientHandler> queue = blockedClients.get(key);
       if (queue == null || queue.isEmpty()) {
+        System.out.println("notifyBlockedClients: No clients blocked for key " + key);
         return;
       }
-      // Process all clients that can be served
-      while (!queue.isEmpty()) {
-        ValueEntry entry = store.get(key);
-        if (entry == null || entry.isExpired() || !entry.isList() || entry.getListValue().isEmpty()) {
-          break; // No more elements to pop
-        }
-        ClientHandler client = queue.poll(); // Get longest-waiting client
+      ValueEntry entry = store.get(key);
+      if (entry == null || entry.isExpired() || !entry.isList() || entry.getListValue().isEmpty()) {
+        System.out.println("notifyBlockedClients: No valid list for key " + key);
+        return;
+      }
+      synchronized (queue) { // Synchronize to prevent race conditions
+        ClientHandler client = queue.peek();
         if (client == null || !client.isRunning) {
-          continue; // Skip disconnected clients
+          queue.poll();
+          System.out.println("notifyBlockedClients: Removed disconnected client for key " + key + ", queue size: " + queue.size());
+          notifyBlockedClients(key); // Recurse for next client
+          return;
         }
         List<String> poppedValues = new ArrayList<>();
         store.compute(key, (k, existing) -> {
@@ -585,8 +632,9 @@ public class Main {
           return new ValueEntry(list, list.isEmpty() ? existing.expiryTime : 0);
         });
         if (!poppedValues.isEmpty()) {
+          queue.poll(); // Remove served client
           client.notifyClient(key, poppedValues.get(0));
-          System.out.println(client.clientSocket.getRemoteSocketAddress() + ": Notified for key " + key + " with value " + poppedValues.get(0));
+          System.out.println(client.clientSocket.getRemoteSocketAddress() + ": Notified for key " + key + " with value " + poppedValues.get(0) + ", queue size: " + queue.size());
         }
       }
       // Clean up empty queue
