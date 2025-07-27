@@ -126,11 +126,11 @@ public class Main {
     public void run() {
       BufferedReader reader = null;
       OutputStream outputStream = null;
+      String clientAddr = clientSocket.getInetAddress() != null ? clientSocket.getInetAddress().getHostAddress() : "unknown";
       try {
         // Get input and output streams
         reader = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
         outputStream = clientSocket.getOutputStream();
-        String clientAddr = clientSocket.getRemoteSocketAddress().toString();
 
         // Read RESP commands
         String line;
@@ -279,6 +279,27 @@ public class Main {
               outputStream.flush();
               System.out.println(clientAddr + ": GET " + key + " -> " + value);
             }
+          } else if ("TYPE".equalsIgnoreCase(command)) {
+            if (numElements != 2) {
+              outputStream.write("-ERR wrong number of arguments for TYPE\r\n".getBytes());
+              outputStream.flush();
+              System.out.println(clientAddr + ": Wrong TYPE args: " + numElements);
+              continue;
+            }
+            String key = elements[1];
+            ValueEntry entry = store.get(key);
+            String type;
+            if (entry == null || entry.isExpired()) {
+              type = "none";
+            } else if (entry.isList()) {
+              type = "list";
+            } else {
+              type = "string";
+            }
+            String response = "+" + type + "\r\n";
+            outputStream.write(response.getBytes());
+            outputStream.flush();
+            System.out.println(clientAddr + ": TYPE " + key + " -> " + type);
           } else if ("RPUSH".equalsIgnoreCase(command)) {
             if (numElements < 3) {
               outputStream.write("-ERR wrong number of arguments for RPUSH\r\n".getBytes());
@@ -501,6 +522,11 @@ public class Main {
               System.out.println(clientAddr + ": Invalid BLPOP timeout: " + timeoutStr);
               continue;
             }
+            // Check socket state before proceeding
+            if (clientSocket.isClosed()) {
+              System.out.println(clientAddr + ": BLPOP " + key + " socket closed before processing");
+              break;
+            }
             // Check if list has elements immediately
             ValueEntry entry = store.get(key);
             if (entry != null && !entry.isExpired() && entry.isList() && !entry.getListValue().isEmpty()) {
@@ -515,9 +541,14 @@ public class Main {
               });
               String value = poppedValues.get(0);
               String response = "*2\r\n$" + key.length() + "\r\n" + key + "\r\n$" + value.length() + "\r\n" + value + "\r\n";
-              outputStream.write(response.getBytes());
-              outputStream.flush();
-              System.out.println(clientAddr + ": BLPOP " + key + " -> [" + key + ", " + value + "]");
+              if (!clientSocket.isClosed()) {
+                outputStream.write(response.getBytes());
+                outputStream.flush();
+                System.out.println(clientAddr + ": BLPOP " + key + " -> [" + key + ", " + value + "]");
+              } else {
+                System.out.println(clientAddr + ": BLPOP " + key + " socket closed, cannot send response");
+                break;
+              }
               continue;
             }
             // Block until an element is available or timeout expires
@@ -526,8 +557,8 @@ public class Main {
               queue.put(this); // Add client to blocking queue
               System.out.println(clientAddr + ": BLPOP " + key + " blocking for " + timeout + " seconds, queue size: " + queue.size());
               long timeoutMs = (long) (timeout * 1000);
-              // Use minimal timeout for 0.0 to allow notifications
-              String[] result = timeout == 0 ? notificationQueue.take() : notificationQueue.poll(timeoutMs > 0 ? timeoutMs : 1, TimeUnit.MILLISECONDS);
+              // For timeout == 0.0, use non-blocking poll
+              String[] result = timeout == 0 ? notificationQueue.poll(0, TimeUnit.MILLISECONDS) : notificationQueue.poll(timeoutMs > 0 ? timeoutMs : 1, TimeUnit.MILLISECONDS);
               System.out.println(clientAddr + ": BLPOP " + key + " poll result: " + (result == null ? "null" : Arrays.toString(result)));
               // Re-check list if poll returns null for timeout == 0.0
               if (result == null && timeout == 0) {
@@ -546,9 +577,14 @@ public class Main {
                   if (!poppedValues.isEmpty()) {
                     String value = poppedValues.get(0);
                     String response = "*2\r\n$" + key.length() + "\r\n" + key + "\r\n$" + value.length() + "\r\n" + value + "\r\n";
-                    outputStream.write(response.getBytes());
-                    outputStream.flush();
-                    System.out.println(clientAddr + ": BLPOP " + key + " re-checked -> [" + key + ", " + value + "]");
+                    if (!clientSocket.isClosed()) {
+                      outputStream.write(response.getBytes());
+                      outputStream.flush();
+                      System.out.println(clientAddr + ": BLPOP " + key + " re-checked -> [" + key + ", " + value + "]");
+                    } else {
+                      System.out.println(clientAddr + ": BLPOP " + key + " re-check socket closed, cannot send response");
+                      break;
+                    }
                     continue;
                   }
                 }
@@ -556,18 +592,28 @@ public class Main {
               // Remove client from queue only if it was not served
               if (result == null) {
                 queue.remove(this);
-                outputStream.write("$-1\r\n".getBytes());
-                outputStream.flush();
-                System.out.println(clientAddr + ": BLPOP " + key + " timed out after " + timeout + " seconds, queue size: " + queue.size());
+                if (!clientSocket.isClosed()) {
+                  outputStream.write("$-1\r\n".getBytes());
+                  outputStream.flush();
+                  System.out.println(clientAddr + ": BLPOP " + key + " timed out after " + timeout + " seconds, queue size: " + queue.size());
+                } else {
+                  System.out.println(clientAddr + ": BLPOP " + key + " timeout socket closed, cannot send response");
+                  break;
+                }
                 continue;
               }
               queue.remove(this); // Remove client after successful notification
               String poppedKey = result[0];
               String value = result[1];
               String response = "*2\r\n$" + poppedKey.length() + "\r\n" + poppedKey + "\r\n$" + value.length() + "\r\n" + value + "\r\n";
-              outputStream.write(response.getBytes());
-              outputStream.flush();
-              System.out.println(clientAddr + ": BLPOP " + key + " unblocked -> [" + poppedKey + ", " + value + "], queue size: " + queue.size());
+              if (!clientSocket.isClosed()) {
+                outputStream.write(response.getBytes());
+                outputStream.flush();
+                System.out.println(clientAddr + ": BLPOP " + key + " unblocked -> [" + poppedKey + ", " + value + "], queue size: " + queue.size());
+              } else {
+                System.out.println(clientAddr + ": BLPOP " + key + " unblocked socket closed, cannot send response");
+                break;
+              }
             } catch (InterruptedException e) {
               Thread.currentThread().interrupt();
               queue.remove(this);
@@ -584,8 +630,7 @@ public class Main {
           }
         }
       } catch (IOException e) {
-        String clientAddr = clientSocket.getInetAddress().getHostAddress();
-        System.out.println(clientAddr + ": IOException: " + e.getMessage());
+        System.out.println(clientAddr + ": IOException in run: " + e.getMessage());
       } finally {
         isRunning = false;
         removeFromBlockingQueues();
@@ -594,10 +639,8 @@ public class Main {
           if (outputStream != null) outputStream.close();
           if (clientSocket != null && !clientSocket.isClosed()) clientSocket.close();
         } catch (IOException e) {
-          String clientAddr = clientSocket.getInetAddress().getHostAddress();
           System.out.println(clientAddr + ": IOException closing: " + e.getMessage());
         }
-        String clientAddr = clientSocket.getInetAddress().getHostAddress();
         System.out.println(clientAddr + ": Disconnected");
       }
     }
@@ -616,7 +659,7 @@ public class Main {
       }
       synchronized (queue) { // Synchronize to prevent race conditions
         ClientHandler client = queue.peek();
-        if (client == null || !client.isRunning) {
+        if (client == null || !client.isRunning || client.clientSocket.isClosed()) {
           queue.poll();
           System.out.println("notifyBlockedClients: Removed disconnected client for key " + key + ", queue size: " + queue.size());
           notifyBlockedClients(key); // Recurse for next client
