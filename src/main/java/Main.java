@@ -116,7 +116,8 @@ public class Main {
             String content;
             ArrayList<String[]> bufferedCommands = new ArrayList<>();
             boolean encounteredMulti = false;
-            HashMap<String, HashMap<String, HashMap<String, String>>> streams = new HashMap<>();
+            // Stream key -> {entry ID -> fields, "ids" -> list of entry IDs}
+            HashMap<String, HashMap<String, Object>> streams = new HashMap<>();
             HashMap<String, String[]> rdbMap = new HashMap<>();
 
             while ((content = clientInput.readLine()) != null) {
@@ -211,11 +212,11 @@ public class Main {
                         ArrayList<String> appendList = listMap.getOrDefault(params[1], new ArrayList<>());
                         if (appendList.isEmpty()) {
                             clientOutput.write("$-1\r\n");
-                        } else if (params.length == 2) { // LPOP key (no count)
+                        } else if (params.length == 2) {
                             String value = appendList.remove(0);
                             if (appendList.isEmpty()) listMap.remove(params[1]);
                             clientOutput.write("$" + value.length() + "\r\n" + value + "\r\n");
-                        } else { // LPOP key count
+                        } else {
                             int count = Integer.parseInt(params[2]);
                             count = Math.min(count, appendList.size());
                             StringBuilder result = new StringBuilder("*" + count + "\r\n");
@@ -284,12 +285,70 @@ public class Main {
                         }
                         clientOutput.flush();
                     } else if (params[0].equalsIgnoreCase("xadd")) {
-                        HashMap<String, HashMap<String, String>> entries = streams.computeIfAbsent(params[1], k -> new HashMap<>());
-                        HashMap<String, String> fields = entries.computeIfAbsent(params[2], k -> new HashMap<>());
-                        fields.put(params[3], params[4]);
-                        entries.put(params[2], fields);
-                        streams.put(params[1], entries);
-                        clientOutput.write("$" + params[2].length() + "\r\n" + params[2] + "\r\n");
+                        String streamKey = params[1];
+                        String entryId = params[2];
+
+                        // Validate entry ID format
+                        if (!entryId.matches("\\d+-\\d+")) {
+                            clientOutput.write("-ERR Invalid stream ID format\r\n");
+                            clientOutput.flush();
+                            continue;
+                        }
+
+                        // Parse entry ID
+                        String[] idParts = entryId.split("-");
+                        long millis;
+                        long seq;
+                        try {
+                            millis = Long.parseLong(idParts[0]);
+                            seq = Long.parseLong(idParts[1]);
+                        } catch (NumberFormatException e) {
+                            clientOutput.write("-ERR Invalid stream ID format\r\n");
+                            clientOutput.flush();
+                            continue;
+                        }
+
+                        // Check for 0-0
+                        if (millis == 0 && seq == 0) {
+                            clientOutput.write("-ERR The ID specified in XADD must be greater than 0-0\r\n");
+                            clientOutput.flush();
+                            continue;
+                        }
+
+                        // Get or initialize stream
+                        HashMap<String, Object> stream = streams.computeIfAbsent(streamKey, k -> new HashMap<>());
+                        @SuppressWarnings("unchecked")
+                        ArrayList<String> entryIds = (ArrayList<String>) stream.computeIfAbsent("ids", k -> new ArrayList<String>());
+
+                        // Validate ID against last entry
+                        if (!entryIds.isEmpty()) {
+                            String lastId = entryIds.get(entryIds.size() - 1);
+                            String[] lastIdParts = lastId.split("-");
+                            long lastMillis = Long.parseLong(lastIdParts[0]);
+                            long lastSeq = Long.parseLong(lastIdParts[1]);
+
+                            if (millis < lastMillis || (millis == lastMillis && seq <= lastSeq)) {
+                                clientOutput.write("-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n");
+                                clientOutput.flush();
+                                continue;
+                            }
+                        } else if (millis == 0 && seq <= 0) {
+                            clientOutput.write("-ERR The ID specified in XADD must be greater than 0-0\r\n");
+                            clientOutput.flush();
+                            continue;
+                        }
+
+                        // Store the entry
+                        HashMap<String, String> fields = new HashMap<>();
+                        for (int i = 3; i < params.length - 1; i += 2) {
+                            fields.put(params[i], params[i + 1]);
+                        }
+                        stream.put(entryId, fields);
+                        entryIds.add(entryId);
+                        stream.put("ids", entryIds);
+                        streams.put(streamKey, stream);
+
+                        clientOutput.write("$" + entryId.length() + "\r\n" + entryId + "\r\n");
                         clientOutput.flush();
                     } else {
                         executeCommand(clientSocket, clientOutput, map, params, rdbMap, replicaOutputStreams, args, serverRole, true);
